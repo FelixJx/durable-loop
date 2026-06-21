@@ -1,0 +1,17 @@
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Test caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor/OS junk
+*.bak
+*.swp
+.DS_Store
+
+# Loop runtime artifacts (per-run state, not source)
+.scratch/

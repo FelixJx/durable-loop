@@ -1,0 +1,31 @@
+{
+  "feature": "<FEATURE>",
+  "iteration": 0,
+  "phase": "planning",
+  "started_at": "",
+  "last_updated": "",
+  "last_action": "",
+  "last_result": "",
+  "cumulative_state": {
+    "decisions_made": [],
+    "artifacts_produced": [],
+    "metrics_snapshot": {},
+    "facts_discovered": []
+  },
+  "budget_used": {
+    "tokens": 0,
+    "dollars": 0,
+    "iterations": 0,
+    "hours": 0
+  },
+  "max_budget": {
+    "tokens": 0,
+    "dollars": 0.0,
+    "iterations": 0,
+    "hours": 0
+  },
+  "status": "fresh",
+  "resume_from": "",
+  "idempotency_keys": [],
+  "thrashing_counter": 0
+}
