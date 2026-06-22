@@ -21,6 +21,7 @@
   - 文件存在且 status in {running, paused_for_approval, failed, over_budget, thrashing}：这是 resume。严格按 checkpoint.resume_from 的指令执行，不要重新规划、不要推翻 cumulative_state.decisions_made。
   - status == "completed"：立刻退出，不做任何动作，输出"already completed at <last_updated>"。
 - 读 `.scratch/<FEATURE>/done.criteria.md` 确认收敛条件（本轮可能需要更新）。
+- **检索历史经验（经验沉淀层 / learnings）**：run `python scripts/durable_loop_learn.py search <FEATURE> --query "<本轮任务关键词，空格分隔>"`（可选 `--type pattern|pitfall`、`--cross-feature` 借鉴同级其他 feature）。命中行形如 `Prior learning applied: [<key>] (...) — <insight>`——**命中必须在本轮思考里显式体现**：pattern 直接复用其做法、pitfall 主动规避其踩坑，并据此调整本轮计划。无命中则照常规划。该检索纯关键词、零依赖、fail-open，无 learnings 也不报错。
 
 【1. 预算仅观测（不设护栏，不停止）】
 - 预算护栏已于 2026-06-19 按用户要求移除——**只要质量**。token / $ / 轮 / 小时**不再阻断** loop，无论消耗多少都继续干，不要因预算停。
@@ -45,6 +46,11 @@
 【4. 每轮结束写 checkpoint】
 - 更新 checkpoint.json：iteration+1, last_updated=now, last_action=本轮做了什么（具体到命令级）, last_result=结果摘要+证据路径, cumulative_state 更新（新增 decisions/artifacts/metrics/facts）, budget_used 累加本轮 tokens/dollars/iterations/hours, resume_from=下一轮第一步具体指令。
 - **原子写入**：写临时文件 `checkpoint.json.tmp` 再 `mv` 覆盖，防写一半 crash 损坏。
+- **沉淀本轮经验（经验沉淀层 / learnings，收尾必做至少 1 条）**：run `python scripts/durable_loop_learn.py log <FEATURE> --type pattern|pitfall --key <kebab-case 键> --insight "<一两句可复用经验>" --confidence <0-10> [--source <文件路径/commit/observed> --iteration <N>]`。
+  - 本轮**成功**得到可复用做法 → `--type pattern`；本轮**失败/踩坑**或从 `cumulative_state.rejected_approaches` 提炼的已否决方案 → `--type pitfall`。
+  - 同 `(type,key)` 会自动**合并**（confidence 取 max、insight 更新、seen+1、id 保留），不会无限追加重复行——所以反复验证同一规律会自然加深它的 confidence。
+  - **只记有迁移价值的经验**：可复用的模式、反复踩的坑、关键不变量。**不要记**显而易见的常识、一次性的瞬时错误（如临时网络抖动、单次 typo）、与本任务强绑定无法迁移的细节。
+  - 该写入原子（tmp+replace）、fail-open，run_id 自动从 checkpoint 读出。
 
 【5. ~~thrashing 检测~~（2026-06-20 已移除，纯质量收敛）】
 - thrashing 检测已按用户要求移除——**纯质量收敛**：只有 verify_done 决定 done/继续。

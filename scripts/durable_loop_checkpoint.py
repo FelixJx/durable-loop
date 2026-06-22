@@ -315,10 +315,82 @@ def _fmt_items(value) -> str:
     return f"- {value}"
 
 
-def build_handoff(cp: dict, iteration: int) -> str:
+# --- verified learnings injection ----------------------------------------
+# When refreshing handoff.md we also surface the loop's "已验证经验" — high-
+# confidence success patterns the run has accumulated — so a context reset
+# carries forward what already works instead of rediscovering it. We read
+# .scratch/<feature>/learnings.jsonl DIRECTLY (per the shared learnings schema)
+# rather than importing/shelling durable_loop_learn.py, keeping the Stop hook
+# decoupled from the learn CLI. Entirely fail-open: a missing / empty / corrupt
+# learnings file yields "(暂无)" and never affects the checkpoint write.
+
+# Minimum confidence for a pattern to count as a "verified" learning, and how
+# many to surface. Mirrors durable_loop_learn.py `compile` defaults
+# (--min-confidence 6 / --limit 10) so the handoff and the CLI agree.
+LEARNINGS_MIN_CONFIDENCE = 6
+LEARNINGS_TOP_N = 10
+
+
+def read_verified_learnings(feature_dir: Path):
+    """Read .scratch/<feature>/learnings.jsonl and return the top verified
+    patterns: non-stale entries with type=='pattern' and confidence>=
+    LEARNINGS_MIN_CONFIDENCE, sorted by confidence desc, capped at LEARNINGS_TOP_N.
+
+    Returns a list of dicts {key, confidence, insight}. Fully fail-open: any
+    error (missing file, bad JSON, junk rows) yields []. Bad lines are skipped,
+    not fatal — mirroring parse_transcript's tolerance."""
+    learnings_path = feature_dir / "learnings.jsonl"
+    try:
+        if not learnings_path.exists():
+            return []
+        rows = []
+        with open(learnings_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue  # bad row — skip, don't fail
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("type") != "pattern":
+                    continue
+                if obj.get("stale") is True:
+                    continue
+                conf = _as_int(obj.get("confidence", 0), 0)
+                if conf < LEARNINGS_MIN_CONFIDENCE:
+                    continue
+                key = str(obj.get("key") or "").strip() or "(no-key)"
+                insight = str(obj.get("insight") or "").strip()
+                rows.append({"key": key, "confidence": conf, "insight": insight})
+        # confidence desc; stable so equal-confidence keeps file order
+        rows.sort(key=lambda r: r["confidence"], reverse=True)
+        return rows[:LEARNINGS_TOP_N]
+    except Exception:  # noqa: BLE001 — learnings are a best-effort enhancement
+        return []
+
+
+def _fmt_learnings(rows) -> str:
+    """Render verified-learning rows as markdown bullets:
+    '- [key] (N/10) insight'. Empty list -> '(暂无)'."""
+    if not rows:
+        return "(暂无)"
+    lines = []
+    for r in rows:
+        insight = r.get("insight") or ""
+        suffix = f" {insight}" if insight else ""
+        lines.append(f"- [{r['key']}] ({r['confidence']}/10){suffix}")
+    return "\n".join(lines)
+
+
+def build_handoff(cp: dict, iteration: int, feature_dir: Path = None) -> str:
     """Render handoff.md content from the checkpoint's cumulative_state + budget.
     Constraint-first: goal / done / invariants / rejected / next action are the
-    load-bearing sections a reset must preserve."""
+    load-bearing sections a reset must preserve. When feature_dir is given, also
+    appends a '已验证经验 (verified learnings)' section read from learnings.jsonl
+    (fail-open: omitted/'(暂无)' on any problem)."""
     state = cp.get("cumulative_state") or {}
     if not isinstance(state, dict):
         state = {}
@@ -334,6 +406,12 @@ def build_handoff(cp: dict, iteration: int) -> str:
     decisions = _first_present(state, "decisions_made", "decisions")
     next_action = cp.get("resume_from") or _first_present(state, "next_action", "next") \
         or "(no resume_from recorded — re-read checkpoint.json before acting)"
+
+    # Verified learnings are a best-effort enhancement: read directly from
+    # learnings.jsonl when we know the feature dir, else render "(暂无)".
+    learnings_md = _fmt_learnings(
+        read_verified_learnings(feature_dir) if feature_dir is not None else []
+    )
 
     now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     parts = [
@@ -366,6 +444,10 @@ def build_handoff(cp: dict, iteration: int) -> str:
         "## 下一轮必须做的第一步",
         "",
         f"{next_action}",
+        "",
+        "## 已验证经验 (verified learnings)",
+        "",
+        learnings_md,
         "",
         "## 预算消耗 (仅观测)",
         "",
@@ -407,7 +489,7 @@ def maybe_write_handoff(cp: dict, feature_dir: Path) -> bool:
 
         # Atomic write of the new handoff (tmp → replace), mirroring the
         # checkpoint write so a crash mid-write can't truncate handoff.md.
-        content = build_handoff(cp, iteration)
+        content = build_handoff(cp, iteration, feature_dir)
         tmp = handoff.with_suffix(handoff.suffix + ".tmp")
         tmp.write_text(content, encoding="utf-8")
         tmp.replace(handoff)

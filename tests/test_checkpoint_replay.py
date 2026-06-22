@@ -257,3 +257,122 @@ def test_maybe_write_handoff_default_n_when_field_absent(tmp_path):
     assert fired is True
     assert cp.get("reset_due") is True
     assert (feature_dir / "handoff.md").exists()
+
+
+# --- verified learnings injected into handoff ------------------------------
+def _learning(type_, key, insight, confidence, stale=False, **extra):
+    """Build one learnings.jsonl row per the shared learnings schema."""
+    row = {
+        "id": key[:8].ljust(8, "0"), "type": type_, "key": key,
+        "insight": insight, "confidence": confidence,
+        "source": "observed", "iteration": 1, "run_id": "",
+        "timestamp": "2026-06-21T00:00:00+00:00", "seen": 1, "stale": stale,
+    }
+    row.update(extra)
+    return row
+
+
+def _write_learnings(tmp_path, rows, feature="f"):
+    d = tmp_path / ".scratch" / feature
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "learnings.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return p
+
+
+def test_handoff_includes_verified_learnings_section(tmp_path, run_hook):
+    # high-confidence patterns are rendered as "- [key] (N/10) insight" bullets
+    _write_learnings(tmp_path, [
+        _learning("pattern", "atomic-tmp-replace", "write tmp then os.replace", 9),
+        _learning("pattern", "stripe-idem-key", "pass idempotency key header", 7),
+    ])
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=5))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    body = (tmp_path / ".scratch" / "f" / "handoff.md").read_text(encoding="utf-8")
+    assert "已验证经验" in body
+    assert "- [atomic-tmp-replace] (9/10) write tmp then os.replace" in body
+    assert "- [stripe-idem-key] (7/10) pass idempotency key header" in body
+
+
+def test_handoff_learnings_only_high_confidence_non_stale_patterns(tmp_path, run_hook):
+    # below-threshold confidence, pitfalls, and stale rows must all be excluded
+    _write_learnings(tmp_path, [
+        _learning("pattern", "good-strong", "keep this", 8),
+        _learning("pattern", "weak-low-conf", "too unsure", 5),          # conf < 6
+        _learning("pitfall", "a-pitfall", "do not do this", 9),          # not a pattern
+        _learning("pattern", "stale-pattern", "source gone", 10, stale=True),  # stale
+    ])
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=5))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    body = (tmp_path / ".scratch" / "f" / "handoff.md").read_text(encoding="utf-8")
+    assert "good-strong" in body
+    assert "weak-low-conf" not in body
+    assert "a-pitfall" not in body
+    assert "stale-pattern" not in body
+
+
+def test_handoff_learnings_sorted_by_confidence_top10(tmp_path, run_hook):
+    # 12 eligible patterns all at confidence 6, plus two clearly-highest so the
+    # confidence-desc ordering and the top-10 cap are both observable
+    rows = [_learning("pattern", f"p{c:02d}", f"insight {c}", 6) for c in range(12)]
+    rows[0]["confidence"] = 10
+    rows[0]["key"] = "highest"
+    rows[1]["confidence"] = 9
+    rows[1]["key"] = "second"
+    _write_learnings(tmp_path, rows)
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=5))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    body = (tmp_path / ".scratch" / "f" / "handoff.md").read_text(encoding="utf-8")
+    section = body.split("已验证经验", 1)[1]
+    bullets = [ln for ln in section.splitlines() if ln.startswith("- [")]
+    assert len(bullets) == 10  # capped at top-10
+    assert bullets[0].startswith("- [highest] (10/10)")
+    assert bullets[1].startswith("- [second] (9/10)")
+
+
+def test_handoff_learnings_failopen_when_absent(tmp_path, run_hook):
+    # no learnings.jsonl -> section renders "(暂无)" and the hook still succeeds
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=5))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    body = (tmp_path / ".scratch" / "f" / "handoff.md").read_text(encoding="utf-8")
+    assert "已验证经验" in body
+    assert "(暂无)" in body
+    # core reset behavior is untouched by the missing learnings file
+    assert json.loads(cp_path.read_text(encoding="utf-8")).get("reset_due") is True
+
+
+def test_handoff_learnings_failopen_on_corrupt_jsonl(tmp_path, run_hook):
+    # bad rows are skipped, good rows survive; the hook never errors
+    d = tmp_path / ".scratch" / "f"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "learnings.jsonl").write_text(
+        "{not valid json\n"
+        + json.dumps(_learning("pattern", "survivor", "still here", 8)) + "\n"
+        + "}}garbage\n",
+        encoding="utf-8",
+    )
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=5))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    body = (tmp_path / ".scratch" / "f" / "handoff.md").read_text(encoding="utf-8")
+    assert "survivor" in body
+
+
+def test_read_verified_learnings_empty_file_failopen(tmp_path):
+    # empty learnings file -> [] (unit-level, no hook)
+    d = tmp_path / ".scratch" / "f"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "learnings.jsonl").write_text("", encoding="utf-8")
+    assert m.read_verified_learnings(d) == []
+    assert m._fmt_learnings([]) == "(暂无)"
+
+
+def test_build_handoff_without_feature_dir_renders_placeholder():
+    # build_handoff called without feature_dir still produces the section
+    body = m.build_handoff({"feature": "f", "iteration": 5}, 5)
+    assert "已验证经验" in body
+    assert "(暂无)" in body

@@ -49,6 +49,8 @@ flowchart LR
 
 > 设计哲学(2026-06 起):**纯质量收敛**。预算/thrashing 护栏已按需移除,`verify_done` 是唯一的 done 判据;成本只观测不阻断。`verify_done` 现做**抗 flip-flop 的 K-连续-PASS 收敛**(单次 PASS 不算完成)。所有刹车类增强(strict 危险操作拦截 / no-progress 暂停)**默认关闭、需显式 opt-in**——理念不变。
 
+> **经验沉淀层 learnings(#3,2026-06-22 已实现)**:`.scratch/<feature>/learnings.jsonl` 跨轮/跨 run 累积"可复用经验",每轮构成 **reflect 闭环**——开头 `search` 借鉴历史(pattern 复用 / pitfall 规避),收尾 `log` 沉淀。`durable_loop_learn.py` 提供 `log/search/prune/compile` 四子命令;**(type,key) 去重合并**(confidence 取 max、seen+1、id 保留)比单纯追加更进一步,反复验证同一规律自然加深其 confidence。**默认开启、纯关键词检索零依赖、跨 feature 默认关、全程 fail-open**(是质量增强,不是刹车,不阻断任何调用)。context reset 时由 Stop hook 把"已验证经验"段直接注入新的 handoff。
+
 ---
 
 ## 为什么裸 /loop 长跑会出事
@@ -309,7 +311,7 @@ durable-loop/
 ├── assets/                        # 模板
 │   ├── checkpoint.json            # 空状态模板
 │   ├── checkpoint.example.json    # 填好的示例
-│   ├── checkpoint.schema.md       # 字段语义
+│   ├── checkpoint.schema.md       # 字段语义(末节登记 learnings.jsonl schema)
 │   ├── done.criteria.md           # 收敛条件模板
 │   ├── handoff.md                 # context reset 交接模板
 │   └── loop-driver-prompt.md      # 喂给 /loop 的驱动 prompt
@@ -321,8 +323,9 @@ durable-loop/
 │   ├── verify_done.py / .sh       # 机械验收(唯一 gate;抗 flip-flop K-连续-PASS)
 │   ├── replay_trace.py            # 只读 trace 复盘(session.log 按 run_id/iter 分组)
 │   ├── emit_schedule.py           # 调度脚手架(min/hours/days/long 配置骨架)
+│   ├── durable_loop_learn.py      # 经验沉淀层:log/search/prune/compile(reflect 闭环,#3)
 │   ├── durable_loop_observe.py    # PostToolUse hook:写 session.log(含 run_id)
-│   ├── durable_loop_checkpoint.py # Stop hook:写 budget/幂等/hours + 每 N 轮自动 handoff/reset
+│   ├── durable_loop_checkpoint.py # Stop hook:写 budget/幂等/hours + 每 N 轮自动 handoff/reset(+注入已验证经验)
 │   ├── durable_loop_guard.py      # (可选)PreToolUse 守卫:幂等门 + opt-in strict 拦截
 │   ├── check_progress.py          # (可选)no-progress 暂停(默认关闭)
 │   └── check_budget.py            # (保留作参考,默认不挂 hook)

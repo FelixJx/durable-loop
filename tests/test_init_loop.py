@@ -7,7 +7,7 @@ import pytest
 
 
 EXPECTED_FILES = ["checkpoint.json", "done.criteria.md", "handoff.md",
-                  "tasks.jsonl", "decisions.log", "session.log"]
+                  "tasks.jsonl", "decisions.log", "session.log", "learnings.jsonl"]
 EXPECTED_DIRS = ["intermediate", "dead_letter", "traces"]
 
 
@@ -29,17 +29,39 @@ def test_checkpoint_placeholder_replaced(tmp_path, run_init):
     assert cp["status"] == "fresh"
 
 
+def test_creates_empty_learnings(tmp_path, run_init):
+    rc, _, _ = run_init("myfeat", tmp_path)
+    assert rc == 0
+    learnings = tmp_path / ".scratch/myfeat/learnings.jsonl"
+    assert learnings.is_file()
+    assert learnings.read_text(encoding="utf-8") == ""  # empty (0 bytes)
+
+
 def test_idempotent_preserves_edits(tmp_path, run_init):
     run_init("myfeat", tmp_path)
     slog = tmp_path / ".scratch/myfeat/session.log"
     slog.write_text("USER EDIT\n", encoding="utf-8")
+    learnings = tmp_path / ".scratch/myfeat/learnings.jsonl"
+    learnings.write_text('{"id":"abc12345","type":"pattern"}\n', encoding="utf-8")
     cp = tmp_path / ".scratch/myfeat/checkpoint.json"
     cp.write_text(json.dumps({"status": "running", "feature": "myfeat"}), encoding="utf-8")
     # re-run WITHOUT --force
     rc, _, _ = run_init("myfeat", tmp_path)
     assert rc == 0
     assert slog.read_text(encoding="utf-8") == "USER EDIT\n"          # preserved
+    # learnings.jsonl content preserved (idempotent — not clobbered)
+    assert learnings.read_text(encoding="utf-8") == '{"id":"abc12345","type":"pattern"}\n'
     assert json.loads(cp.read_text(encoding="utf-8"))["status"] == "running"  # preserved
+
+
+def test_force_preserves_learnings(tmp_path, run_init):
+    run_init("myfeat", tmp_path)
+    learnings = tmp_path / ".scratch/myfeat/learnings.jsonl"
+    learnings.write_text('{"id":"abc12345","type":"pattern"}\n', encoding="utf-8")
+    # --force must NOT clobber accumulated learnings (durability)
+    rc, _, _ = run_init("myfeat", tmp_path, extra=["--force"])
+    assert rc == 0
+    assert learnings.read_text(encoding="utf-8") == '{"id":"abc12345","type":"pattern"}\n'
 
 
 def test_force_overwrites(tmp_path, run_init):

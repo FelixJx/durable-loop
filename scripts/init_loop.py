@@ -17,6 +17,7 @@
 #   tasks.jsonl       append-only task stream (empty)
 #   decisions.log     ADR-style decision log (empty)
 #   session.log       append-only observability log (empty)
+#   learnings.jsonl   append-only learnings store (empty; written by CORE scripts)
 #   intermediate/     filesystem offload for large outputs
 #   dead_letter/      DLQ for permanently-failed idempotent ops
 #   traces/           per-iteration execution traces
@@ -89,6 +90,16 @@ def touch_file(dest: Path, force: bool) -> str:
     return f"  wrote:           {dest.name}"
 
 
+def touch_preserve(dest: Path) -> str:
+    """Create an empty file if missing, but ALWAYS preserve existing content —
+    even under --force. Used for accumulated durable data (like learnings.jsonl),
+    which, like checkpoint.json state, must never be clobbered by a re-init."""
+    if dest.is_file():
+        return f"  keep  (exists): {dest.name}  (accumulated content preserved)"
+    dest.write_text("", encoding="utf-8")
+    return f"  wrote:           {dest.name}"
+
+
 def feature_hint(feature: str, project_dir: Path) -> str:
     # On Windows the parent shell is PowerShell; on Unix it's bash/zsh. We can't
     # export back into the harness from this child process, so we just print the
@@ -139,6 +150,8 @@ def main() -> int:
     print(touch_file(feature_dir / "tasks.jsonl", args.force))
     print(touch_file(feature_dir / "decisions.log", args.force))
     print(touch_file(feature_dir / "session.log", args.force))
+    # learnings.jsonl is accumulated durable data — preserved even under --force.
+    print(touch_preserve(feature_dir / "learnings.jsonl"))
 
     print("  dirs:             intermediate/ dead_letter/ traces/")
     print(f"init_loop: done. Next: edit {feature_dir}/done.criteria.md with task-specific criteria,")

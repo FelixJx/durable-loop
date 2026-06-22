@@ -33,3 +33,35 @@
 - **新增运行时字段全部向后兼容（2026-06-22）**：`run_id` / `verify_history` / `converge_k` / `reset_every_n` / `reset_due` / `no_progress_limit` / `strict_guard` 在旧 checkpoint 缺失时各自取默认值，绝不硬失败。模板 `checkpoint.json` 已预置默认（`converge_k:2` / `reset_every_n:5` / `no_progress_limit:0` / `strict_guard:false`），但脚本不依赖模板预置。**默认理念不变**：收敛门控（K-连续-PASS）与 context-reset 是质量收敛增强（不阻断其他 session）；strict 守卫与 no-progress 暂停是**刹车类，默认关闭**，需显式 opt-in
 - **session.log 行格式（2026-06-22）**：每行 JSON 新增 `run_id` 键（位于 `ts` 与 `iter` 之间），由 `durable_loop_observe.py` 从 checkpoint 读取写入；旧日志无该键时 `replay_trace.py` 归入 `(no run_id)` 桶
 - **HITL 产物 `pending_approval.json`**：由 `durable_loop_guard.py`（strict 拦截）与 `check_progress.py`（no-progress 暂停）写入 `.scratch/<FEATURE>/`，结构 `{"requests":[{ts,tool,command,reason,status:"pending"}]}`。消费方人工清除该文件并把 status 从 `paused_for_approval` 改回 `running`（`status_before_pause` 记录原状态）即可恢复
+
+---
+
+## 经验沉淀层 `learnings.jsonl`（2026-06-22 新增，#3）
+
+与 `checkpoint.json` **同级**的另一份持久化产物：`.scratch/<FEATURE>/learnings.jsonl`——跨轮、跨 run、（可选）跨 feature 累积"可复用经验"。由 `init_loop.py` 在 init 时 scaffold（空 0 字节，且 `--force` **也保留**已有内容，durability 等同 checkpoint.json）；由 `durable_loop_learn.py` 读写；handoff 刷新（`durable_loop_checkpoint.py`）只读它注入"已验证经验"段。
+
+**JSONL，每行一个 JSON 对象**（11 字段）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 8 位短 hash / uuid hex 前 8 位，用于引用/去重 |
+| `type` | string | `pattern`（成功模式）或 `pitfall`（失败教训） |
+| `key` | string | kebab-case 去重主键（同 `type+key` 视为同一条） |
+| `insight` | string | 一两句可复用经验 |
+| `confidence` | int | 0–10，钳制 |
+| `source` | string | 文件路径 / commit / `observed`（prune 据此判 stale） |
+| `iteration` | int \| null | 记录时的 iteration |
+| `run_id` | string | 从 checkpoint 读，缺失为 `""` |
+| `timestamp` | ISO 8601 | 最近一次记录时刻 |
+| `seen` | int | 同 key 再次 log 时 +1（默认 1） |
+| `stale` | bool | `prune` 检测 source 失效时置 true（默认 false） |
+
+**CLI**：`python scripts/durable_loop_learn.py <log|search|prune|compile> <FEATURE> [project_dir] [options]`
+- `log`：去重合并（同 `(type,key)` → confidence 取 max、insight 用新值、seen+1、timestamp 更新、id 保留；否则 append 新行），原子 tmp+replace 写。
+- `search`：在 key+insight+source 上关键词打分，排序=（非 stale 优先, 匹配分 desc, confidence desc）；`--limit`（默认 5）、`--type`、`--cross-feature`（默认关，扫同级 `.scratch/*/learnings.jsonl`）。
+- `prune`：source 为已失踪文件路径→标 stale；默认 dry-run 仅报告，`--apply` 才删 stale 行回写（`observed`/URL/commit/无路径特征永不 stale）。
+- `compile`：从非 stale 的 `pattern`（confidence ≥ `--min-confidence`，默认 6）按 confidence 降序生成 `## 已验证经验 (verified learnings)` markdown 到 stdout（供 handoff 注入），`--limit` 默认 10。
+
+**与 handoff 的契约**：`durable_loop_checkpoint.py` 在每 `reset_every_n` 轮刷新 handoff.md 时，直接读 `learnings.jsonl`（不 import/shell learn 脚本），按相同阈值（pattern-only、非 stale、confidence ≥ 6、top-10、confidence 降序）注入 `## 已验证经验 (verified learnings)` 段；空则输出 `(暂无)`。阈值常量 `LEARNINGS_MIN_CONFIDENCE=6` / `LEARNINGS_TOP_N=10` 与 `compile` 默认对齐。
+
+**理念**：learnings 是**质量增强、默认开启**，但**不是刹车/拦截**——不阻断任何工具调用。全程纯标准库、跨平台、fail-open（无目录/无文件/坏行 → 友好 no-op/空结果，绝不抛错影响其他 session）；非法 feature 名 / project_dir 不存在 → exit 2（对齐 verify_done.py）；文件级原子写。
