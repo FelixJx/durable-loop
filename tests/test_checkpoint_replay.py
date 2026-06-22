@@ -128,3 +128,132 @@ def test_main_writes_dollars_and_keys(tmp_path, run_hook):
 def test_main_failopen_no_scratch(tmp_path, run_hook):
     rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
     assert rc == 0  # no .scratch -> fail open, exit 0
+
+
+# --- context reset / handoff (improvement #2) ------------------------------
+def _reset_checkpoint(iteration, reset_every_n=None, status="running"):
+    cp = {
+        "feature": "f", "iteration": iteration, "status": status,
+        "budget_used": {"tokens": 10, "dollars": 0.1, "hours": 0.5, "iterations": iteration},
+        "started_at": "", "idempotency_keys": [],
+        "resume_from": "run pytest tests/test_charge.py -x",
+        "cumulative_state": {
+            "goal": "make charge idempotent",
+            "artifacts_produced": ["src/charge.py", "tests/test_charge.py"],
+            "decisions_made": ["use stripe idempotency key"],
+            "facts_discovered": ["replay returns first 200, not a new charge"],
+            "rejected_approaches": ["in-memory dedupe — lost on restart"],
+        },
+    }
+    if reset_every_n is not None:
+        cp["reset_every_n"] = reset_every_n
+    return cp
+
+
+def _write_cp(tmp_path, cp, feature="f"):
+    cp_dir = tmp_path / ".scratch" / feature
+    cp_dir.mkdir(parents=True, exist_ok=True)
+    p = cp_dir / "checkpoint.json"
+    p.write_text(json.dumps(cp), encoding="utf-8")
+    return p
+
+
+def test_handoff_fires_at_nth_iteration(tmp_path, run_hook):
+    # default reset_every_n=5; iteration 5 -> 5 % 5 == 0 -> reset due
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=5))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    out = json.loads(cp_path.read_text(encoding="utf-8"))
+    assert out.get("reset_due") is True
+    handoff = tmp_path / ".scratch" / "f" / "handoff.md"
+    assert handoff.exists()
+    body = handoff.read_text(encoding="utf-8")
+    # constraint-class facts must survive the reset
+    assert "make charge idempotent" in body
+    assert "in-memory dedupe" in body          # rejected approach
+    assert "run pytest tests/test_charge.py -x" in body  # next action from resume_from
+
+
+def test_handoff_archives_previous_version(tmp_path, run_hook):
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=10))
+    # a stale handoff already exists -> must be archived under iter_<N>.md
+    handoff = tmp_path / ".scratch" / "f" / "handoff.md"
+    handoff.write_text("OLD HANDOFF CONTENT", encoding="utf-8")
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    archived = tmp_path / ".scratch" / "f" / "handoff_archive" / "iter_10.md"
+    assert archived.exists()
+    assert archived.read_text(encoding="utf-8") == "OLD HANDOFF CONTENT"
+    # new handoff overwrote the old one
+    assert "OLD HANDOFF CONTENT" not in handoff.read_text(encoding="utf-8")
+    assert json.loads(cp_path.read_text(encoding="utf-8")).get("reset_due") is True
+
+
+def test_handoff_not_triggered_before_nth(tmp_path, run_hook):
+    # iteration 3 with default N=5 -> 3 % 5 != 0 -> no reset
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=3))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    out = json.loads(cp_path.read_text(encoding="utf-8"))
+    assert "reset_due" not in out  # flag is only ever set, never spuriously written
+    assert not (tmp_path / ".scratch" / "f" / "handoff.md").exists()
+
+
+def test_handoff_iteration_zero_never_resets(tmp_path, run_hook):
+    # iteration 0: 0 % 5 == 0 but we explicitly require iteration > 0
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=0))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    out = json.loads(cp_path.read_text(encoding="utf-8"))
+    assert "reset_due" not in out
+    assert not (tmp_path / ".scratch" / "f" / "handoff.md").exists()
+
+
+def test_handoff_disabled_when_n_zero(tmp_path, run_hook):
+    # reset_every_n=0 disables the feature even on a multiple-of-anything iteration
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=5, reset_every_n=0))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    out = json.loads(cp_path.read_text(encoding="utf-8"))
+    assert "reset_due" not in out
+    assert not (tmp_path / ".scratch" / "f" / "handoff.md").exists()
+
+
+def test_handoff_custom_cadence(tmp_path, run_hook):
+    # reset_every_n=3, iteration 6 -> 6 % 3 == 0 -> fires
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=6, reset_every_n=3))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    assert json.loads(cp_path.read_text(encoding="utf-8")).get("reset_due") is True
+    assert (tmp_path / ".scratch" / "f" / "handoff.md").exists()
+
+
+def test_handoff_skipped_for_inactive_status(tmp_path, run_hook):
+    # a paused/finished loop must not be touched even if cadence would fire
+    cp_path = _write_cp(tmp_path, _reset_checkpoint(iteration=5, status="completed"))
+    rc, _ = run_hook("durable_loop_checkpoint.py", {"cwd": str(tmp_path), "transcript_path": ""})
+    assert rc == 0
+    out = json.loads(cp_path.read_text(encoding="utf-8"))
+    assert "reset_due" not in out
+    assert not (tmp_path / ".scratch" / "f" / "handoff.md").exists()
+
+
+# --- unit-level: build_handoff / maybe_write_handoff -----------------------
+def test_build_handoff_falls_back_when_state_missing():
+    cp = {"feature": "myfeat", "iteration": 5}
+    body = m.build_handoff(cp, 5)
+    assert "myfeat" in body                 # goal falls back to feature name
+    assert "(none recorded)" in body        # empty sections render a placeholder
+    assert "iteration 5" in body or "iterations: 5" in body
+
+
+def test_maybe_write_handoff_default_n_when_field_absent(tmp_path):
+    # field absent -> DEFAULT_RESET_EVERY_N (5) used (back-compat)
+    cp = _reset_checkpoint(iteration=5)
+    del cp["cumulative_state"]  # also exercises missing cumulative_state
+    feature_dir = tmp_path / ".scratch" / "f"
+    feature_dir.mkdir(parents=True)
+    fired = m.maybe_write_handoff(cp, feature_dir)
+    assert fired is True
+    assert cp.get("reset_due") is True
+    assert (feature_dir / "handoff.md").exists()

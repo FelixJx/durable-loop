@@ -47,7 +47,7 @@ flowchart LR
     style B6 fill:#34d399,stroke:#059669,color:#000
 ```
 
-> 设计哲学(2026-06 起):**纯质量收敛**。预算/thrashing 护栏已按需移除,`verify_done` 是唯一的 done 判据;成本只观测不阻断。
+> 设计哲学(2026-06 起):**纯质量收敛**。预算/thrashing 护栏已按需移除,`verify_done` 是唯一的 done 判据;成本只观测不阻断。`verify_done` 现做**抗 flip-flop 的 K-连续-PASS 收敛**(单次 PASS 不算完成)。所有刹车类增强(strict 危险操作拦截 / no-progress 暂停)**默认关闭、需显式 opt-in**——理念不变。
 
 ---
 
@@ -99,12 +99,12 @@ flowchart TB
 | # | 要素 | 解决的 gap | 落地点 |
 |---|---|---|---|
 | ① | 外部状态持久化 | crash 即失忆 | `checkpoint.json` + Stop hook 原子写 |
-| ② | 机器可验收敛 | 模型 30% 自评 done | `done.criteria.md` + `verify_done.py` |
+| ② | 机器可验收敛 | 模型 30% 自评 done | `done.criteria.md` + `verify_done.py`(抗 flip-flop K-连续-PASS) |
 | ③ | 成本观测 | 看不清花了多少 | `budget_used`(纯观测) |
-| ④ | 上下文管理 | 90min tunnel vision | `handoff.md` + 每 N 轮 full reset |
-| ⑤ | 重试 + 幂等 | 95% 单步→端到端 60% | 退避 1/2/4/8s + `dead_letter/` DLQ |
-| ⑥ | HITL 断点 | 不可逆操作无刹车 | `pending_approval.json` + git-guardrails |
-| ⑦ | 可观测 | silent failure | `session.log`(PostToolUse hook) |
+| ④ | 上下文管理 | 90min tunnel vision | `handoff.md` + 每 N 轮 full reset(**Stop hook 自动刷新/归档/置 reset_due**) |
+| ⑤ | 重试 + 幂等 | 95% 单步→端到端 60% | 退避 1/2/4/8s + `dead_letter/` DLQ +(可选)`durable_loop_guard.py` 幂等门 |
+| ⑥ | HITL 断点 | 不可逆操作无刹车 | `pending_approval.json` + git-guardrails +(可选 opt-in)`durable_loop_guard.py` strict 拦截 |
+| ⑦ | 可观测 | silent failure | `session.log`(PostToolUse hook,含 run_id)+ `replay_trace.py` 复盘 |
 | ⑧ | 调度选型 | 场景错配丢 session/烧钱 | 时间尺度决策表 |
 
 ---
@@ -251,8 +251,10 @@ bash scripts/init_loop.sh <feature>
 
 | hook | 事件 | 强制 |
 |---|---|---|
-| `durable_loop_observe.py` | PostToolUse | 每个工具调用自动 append `session.log` |
-| `durable_loop_checkpoint.py` | Stop | 读 transcript 写 `budget_used` + 检测副作用更新 idempotency key |
+| `durable_loop_observe.py` | PostToolUse | 每个工具调用自动 append `session.log`(含 run_id) |
+| `durable_loop_checkpoint.py` | Stop | 读 transcript 写 `budget_used` + 检测副作用更新 idempotency key + **每 `reset_every_n` 轮自动刷新 handoff/归档/置 `reset_due`** |
+
+> **可选第 3 个 hook(默认 opt-in)**:`durable_loop_guard.py`(PreToolUse)——幂等门(副作用 key 命中即 deny)+ opt-in strict 危险操作拦截(env `DURABLE_LOOP_STRICT` 或 checkpoint.`strict_guard=true`)。不接线则零拦截,纯质量收敛理念不变。另有可选 `check_progress.py`(Stop)做 no-progress 暂停,默认关闭。
 
 ```jsonc
 // Windows: C:/Users/<YOU>/.claude/settings.json (用绝对正斜杠 + python,不要 python3/$HOME)
@@ -315,10 +317,14 @@ durable-loop/
 │   ├── methodology.md             # 9 gap / 8 要素 / 20 反模式
 │   └── recipes.md                 # 三配方详解
 ├── scripts/                       # 执行器(纯 stdlib,跨平台)
-│   ├── init_loop.py / .sh         # 初始化状态目录
-│   ├── verify_done.py / .sh       # 机械验收(唯一 gate)
-│   ├── durable_loop_observe.py    # PostToolUse hook:写 session.log
-│   ├── durable_loop_checkpoint.py # Stop hook:写 budget/幂等/hours
+│   ├── init_loop.py / .sh         # 初始化状态目录(fresh 注入 run_id)
+│   ├── verify_done.py / .sh       # 机械验收(唯一 gate;抗 flip-flop K-连续-PASS)
+│   ├── replay_trace.py            # 只读 trace 复盘(session.log 按 run_id/iter 分组)
+│   ├── emit_schedule.py           # 调度脚手架(min/hours/days/long 配置骨架)
+│   ├── durable_loop_observe.py    # PostToolUse hook:写 session.log(含 run_id)
+│   ├── durable_loop_checkpoint.py # Stop hook:写 budget/幂等/hours + 每 N 轮自动 handoff/reset
+│   ├── durable_loop_guard.py      # (可选)PreToolUse 守卫:幂等门 + opt-in strict 拦截
+│   ├── check_progress.py          # (可选)no-progress 暂停(默认关闭)
 │   └── check_budget.py            # (保留作参考,默认不挂 hook)
 └── tests/                         # pytest 套件
 ```

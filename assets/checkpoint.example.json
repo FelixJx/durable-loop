@@ -45,5 +45,14 @@
     "pay-charge-v3-user42",
     "notify-email-user42-receipt"
   ],
-  "thrashing_counter": 0
+  "thrashing_counter": 0,
+  "run_id": "9f2c1a7b4e5d4f0a8b3c6d1e2f7a9b0c",
+  "verify_history": [
+    {"iteration": 2, "result": "FAIL", "timestamp": "2026-06-15T10:48:02Z"},
+    {"iteration": 3, "result": "FAIL", "timestamp": "2026-06-15T11:24:17Z"}
+  ],
+  "converge_k": 2,
+  "reset_every_n": 5,
+  "no_progress_limit": 0,
+  "strict_guard": false
 }

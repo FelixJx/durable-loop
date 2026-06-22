@@ -25,9 +25,11 @@
 # checkpoint.json state is ALWAYS preserved (durability) unless --force.
 
 import argparse
+import json
 import re
 import shutil
 import sys
+import uuid
 from pathlib import Path
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -51,6 +53,32 @@ def write_file(dest: Path, src_asset: Path, feature: str, force: bool) -> str:
         return ""
     text = src_asset.read_text(encoding="utf-8").replace("<FEATURE>", feature)
     dest.write_text(text, encoding="utf-8")
+    return f"  wrote:           {dest.name}"
+
+
+def write_checkpoint(dest: Path, src_asset: Path, feature: str, force: bool) -> str:
+    """Like write_file, but for checkpoint.json: also injects a fresh run_id so
+    each fresh start gets a unique trace identifier (session.log trace-ification).
+
+    run_id is uuid4 hex. Injected only on a fresh start (this code path runs only
+    when the checkpoint does not yet exist or --force is given); resume preserves
+    the existing checkpoint untouched, so its run_id is never rewritten. If the
+    asset is unparseable JSON we fall back to a plain placeholder replace so init
+    never hard-fails on a malformed template (backward compatible)."""
+    if dest.is_file() and not force:
+        return f"  keep  (exists): {dest.name}"
+    if not src_asset.is_file():
+        print(f"  WARN  missing asset, skipping: {src_asset.name}", file=sys.stderr)
+        return ""
+    text = src_asset.read_text(encoding="utf-8").replace("<FEATURE>", feature)
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        dest.write_text(text, encoding="utf-8")
+        return f"  wrote:           {dest.name}"
+    if not data.get("run_id"):
+        data["run_id"] = uuid.uuid4().hex
+    dest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return f"  wrote:           {dest.name}"
 
 
@@ -104,7 +132,7 @@ def main() -> int:
     if cp.is_file() and not args.force:
         print("  keep  (exists):  checkpoint.json  (existing loop state preserved)")
     else:
-        print(write_file(cp, assets / "checkpoint.json", feature, args.force))
+        print(write_checkpoint(cp, assets / "checkpoint.json", feature, args.force))
 
     print(write_file(feature_dir / "done.criteria.md", assets / "done.criteria.md", feature, args.force))
     print(write_file(feature_dir / "handoff.md", assets / "handoff.md", feature, args.force))

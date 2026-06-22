@@ -259,6 +259,168 @@ def atomic_write_json(path: Path, data: dict) -> None:
     tmp.replace(path)  # atomic on POSIX
 
 
+# --- context reset / handoff (improvement #2) ----------------------------
+# Every reset_every_n iterations, refresh handoff.md from cumulative_state so a
+# full context reset can rebuild minimal CONSTRAINT-level context (current goal /
+# done / invariants / rejected approaches / next action) instead of a lossy
+# semantic summary. Default N=5; 0 disables. The whole feature is best-effort and
+# NEVER blocks: any failure here is swallowed so the Stop hook still exits 0.
+
+# Default reset cadence when the checkpoint omits `reset_every_n` (back-compat).
+DEFAULT_RESET_EVERY_N = 5
+
+
+def _as_int(value, default=0) -> int:
+    """Coerce a checkpoint field to int, tolerating strings / None / junk."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_present(state: dict, *keys):
+    """Return the first key's value present (and truthy-ish) in state, else None.
+    cumulative_state field names have drifted across schema revisions, so we look
+    up several synonyms rather than assume one canonical key."""
+    if not isinstance(state, dict):
+        return None
+    for k in keys:
+        if k in state and state[k] not in (None, "", [], {}):
+            return state[k]
+    return None
+
+
+def _fmt_items(value) -> str:
+    """Render a cumulative_state value as markdown bullet lines. Accepts list,
+    dict, scalar, or None. Always returns at least one line."""
+    if value is None:
+        return "- (none recorded)"
+    if isinstance(value, str):
+        return f"- {value}" if value.strip() else "- (none recorded)"
+    if isinstance(value, dict):
+        lines = []
+        for k, v in value.items():
+            lines.append(f"- **{k}**: {v}")
+        return "\n".join(lines) if lines else "- (none recorded)"
+    if isinstance(value, (list, tuple)):
+        lines = []
+        for item in value:
+            if isinstance(item, dict):
+                # flatten one-level dicts to "k: v; k: v"
+                inner = "; ".join(f"{ik}: {iv}" for ik, iv in item.items())
+                lines.append(f"- {inner}")
+            else:
+                lines.append(f"- {item}")
+        return "\n".join(lines) if lines else "- (none recorded)"
+    return f"- {value}"
+
+
+def build_handoff(cp: dict, iteration: int) -> str:
+    """Render handoff.md content from the checkpoint's cumulative_state + budget.
+    Constraint-first: goal / done / invariants / rejected / next action are the
+    load-bearing sections a reset must preserve."""
+    state = cp.get("cumulative_state") or {}
+    if not isinstance(state, dict):
+        state = {}
+    budget = cp.get("budget_used") or {}
+    if not isinstance(budget, dict):
+        budget = {}
+
+    goal = _first_present(state, "goal", "objective", "current_goal", "target") \
+        or cp.get("feature") or "(goal not recorded in cumulative_state)"
+    done = _first_present(state, "artifacts_produced", "done", "completed", "steps_done")
+    invariants = _first_present(state, "invariants", "constraints", "facts_discovered")
+    rejected = _first_present(state, "rejected_approaches", "rejected", "failed_attempts", "dead_ends")
+    decisions = _first_present(state, "decisions_made", "decisions")
+    next_action = cp.get("resume_from") or _first_present(state, "next_action", "next") \
+        or "(no resume_from recorded — re-read checkpoint.json before acting)"
+
+    now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    parts = [
+        "# handoff.md — context reset 交接 (auto-generated)",
+        "",
+        f"> 由 durable_loop_checkpoint.py 在 iteration {iteration} 自动刷新 "
+        f"(reset_every_n cadence)。{now}",
+        "> 约束类事实优先：reset 后必须遵守下列不变量/已否决方案，不要重复踩坑。",
+        "",
+        "## 当前目标",
+        "",
+        f"{goal}",
+        "",
+        "## 已完成 (artifacts / decisions)",
+        "",
+        _fmt_items(done),
+        "",
+        "### 已记录决策",
+        "",
+        _fmt_items(decisions),
+        "",
+        "## 不变量 / 约束 (别违反)",
+        "",
+        _fmt_items(invariants),
+        "",
+        "## 已否决方案 (别重试)",
+        "",
+        _fmt_items(rejected),
+        "",
+        "## 下一轮必须做的第一步",
+        "",
+        f"{next_action}",
+        "",
+        "## 预算消耗 (仅观测)",
+        "",
+        f"- iterations: {iteration}",
+        f"- tokens: {budget.get('tokens', 0)}",
+        f"- dollars: {budget.get('dollars', 0)}",
+        f"- hours: {budget.get('hours', 0)}",
+        "",
+    ]
+    return "\n".join(parts)
+
+
+def maybe_write_handoff(cp: dict, feature_dir: Path) -> bool:
+    """If the reset cadence is due this iteration, archive the old handoff and
+    write a fresh one, then flag reset_due=true on the checkpoint dict (caller
+    persists it in the same atomic write). Returns True if a reset fired.
+
+    Fully fail-open: any error is swallowed and reset_due is left untouched so a
+    broken filesystem never blocks the Stop hook or corrupts the checkpoint."""
+    try:
+        n = _as_int(cp.get("reset_every_n", DEFAULT_RESET_EVERY_N), DEFAULT_RESET_EVERY_N)
+        if n <= 0:
+            return False  # 0 (or junk coerced low) disables the feature
+        iteration = _as_int(cp.get("iteration", 0), 0)
+        if iteration <= 0 or iteration % n != 0:
+            return False
+
+        handoff = feature_dir / "handoff.md"
+        # Archive the existing handoff (if any) before overwriting, so history is
+        # not lost. Named by the iteration that produced it.
+        if handoff.exists():
+            archive_dir = feature_dir / "handoff_archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                prev = handoff.read_text(encoding="utf-8")
+            except OSError:
+                prev = ""
+            (archive_dir / f"iter_{iteration}.md").write_text(prev, encoding="utf-8")
+
+        # Atomic write of the new handoff (tmp → replace), mirroring the
+        # checkpoint write so a crash mid-write can't truncate handoff.md.
+        content = build_handoff(cp, iteration)
+        tmp = handoff.with_suffix(handoff.suffix + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(handoff)
+
+        # Signal the loop driver to perform a full context reset next iteration.
+        cp["reset_due"] = True
+        return True
+    except Exception as exc:  # noqa: BLE001 — handoff is best-effort, never fatal
+        print(f"[durable_loop_checkpoint] handoff skipped (fail-open): {exc}",
+              file=sys.stderr)
+        return False
+
+
 def main() -> int:
     ev = read_stdin()
     cwd = ev.get("cwd") or os.getcwd()
@@ -315,7 +477,12 @@ def main() -> int:
     # decision to BOTH sources in the SAME format" as the contract; this hook
     # only handles what it can derive mechanically (tokens / idempotency / hours).
 
-    # 3. atomic write back
+    # 3. context reset: every reset_every_n iterations, refresh handoff.md from
+    # cumulative_state and flag reset_due so the next loop does a full reset.
+    # Best-effort, never blocks; mutates cp (reset_due) folded into the write below.
+    maybe_write_handoff(cp, feature_dir)
+
+    # 4. atomic write back
     cp["last_updated"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     atomic_write_json(cp_path, cp)
     return 0

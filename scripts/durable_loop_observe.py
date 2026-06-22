@@ -20,8 +20,12 @@
 #   hook is safe to install globally — it only writes when a loop is running.
 #
 # Writes one JSON line per tool call to .scratch/<feature>/session.log:
-#   {"ts","iter","tool","action","resp","phase"}
-# iter/phase read from checkpoint.json so the log stays in sync with state.
+#   {"ts","run_id","iter","tool","action","resp","phase"}
+# run_id/iter/phase read from checkpoint.json so the log stays in sync with
+# state. run_id lets replay_trace.py group a session.log into distinct runs
+# (fresh starts) even when the same .scratch/<feature>/ is reused across crashes
+# and resumes. Missing run_id (older checkpoints) degrades to "" — backward
+# compatible.
 
 import json
 import os
@@ -105,13 +109,15 @@ def summarize(tool_name: str, tool_input: dict, tool_response) -> tuple:
 
 
 def read_iter_phase(cp_path: Path):
+    """Return (iteration, phase, run_id) from the checkpoint. run_id defaults to
+    "" for older checkpoints that predate the field (backward compatible)."""
     if not cp_path or not cp_path.exists():
-        return "?", "?"
+        return "?", "?", ""
     try:
         d = json.loads(cp_path.read_text(encoding="utf-8"))
-        return d.get("iteration", "?"), d.get("phase", "?")
+        return d.get("iteration", "?"), d.get("phase", "?"), d.get("run_id", "")
     except (OSError, json.JSONDecodeError, ValueError):
-        return "?", "?"
+        return "?", "?", ""
 
 
 def main() -> int:
@@ -135,11 +141,12 @@ def main() -> int:
     tool_input = ev.get("tool_input", {}) or {}
     tool_response = ev.get("tool_response")
     action, resp = summarize(tool_name, tool_input, tool_response)
-    it, ph = read_iter_phase(cp_path)
+    it, ph, run_id = read_iter_phase(cp_path)
     ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
     entry = {
         "ts": ts,
+        "run_id": run_id,
         "iter": it,
         "tool": tool_name,
         "action": action,

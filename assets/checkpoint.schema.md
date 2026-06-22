@@ -14,8 +14,15 @@
 | `max_budget` | object |  | fresh start | {tokens, dollars, iterations, hours}；⚠️ **2026-06-19 起不再强制**——预算护栏按用户要求移除（只要质量）。字段保留作参考，全 0 = 无上限；改了也不阻断任何调用 |
 | `status` | string | ✓ | 每轮末尾 | fresh / running / paused_for_approval / over_budget / thrashing / completed / failed |
 | `resume_from` | string | ✓ | 每轮末尾 | 下一轮第一步要做什么的具体指令。crash 恢复后 agent 读完即知道干啥 |
-| `idempotency_keys` | array | ✓ | 每次副作用前查重+执行后追加 | 已执行的副作用 key 列表，命中则 skip 不重放 |
+| `idempotency_keys` | array | ✓ | 每次副作用前查重+执行后追加 | 已执行的副作用 key 列表，命中则 skip 不重放（`durable_loop_guard.py` PreToolUse 守卫在执行前命中即 deny，与 Stop hook 的追加构成 record→replay-block 闭环） |
 | `thrashing_counter` | int |  | （已弃用） | thrashing 检测 2026-06-20 已移除（纯质量收敛）；字段保留兼容，不再更新/使用 |
+| `run_id` | string |  | fresh start 注入（resume 不变） | uuid4 hex 运行标识，由 `init_loop.py` 在 fresh/`--force` 时注入，resume 保留旧值。`session.log` 每行带此字段，`replay_trace.py` 按它分组成独立 run。缺失（旧 checkpoint）按 `""` 处理（向后兼容） |
+| `verify_history` | array |  | `verify_done.py` 每次运行 append | 每条 `{iteration:int\|null, result:"PASS"\|"FAIL", timestamp:ISO8601}`；尾部连续 PASS 数 ≥ `converge_k` 才判收敛（抗 flip-flop）。运行时不存在按 `[]` 处理；模板可不预置 |
+| `converge_k` | int |  | fresh start（可选） | 收敛所需的连续 PASS 轮数 K，默认 2；优先级 env `DURABLE_LOOP_CONVERGE_K` > 此字段 > 默认 2。仅在 checkpoint 存在且可解析时启用门控；无 checkpoint 退化为原单次判定 |
+| `reset_every_n` | int |  | fresh start（可选） | context reset 节律：每 N 轮由 Stop hook（`durable_loop_checkpoint.py`）从 cumulative_state 刷新 handoff.md、归档旧版到 `.scratch/<FEATURE>/handoff_archive/iter_<N>.md` 并置 `reset_due`。默认 5，0=禁用，iteration=0 永不触发。缺失按默认 5 处理 |
+| `reset_due` | bool |  | Stop hook 触发 reset 时写 true | 标记下一轮需 full context reset；仅在 reset 触发时写入（只设不清），driver resume 时若为 true 则执行 reset 并把该键清回 false/删除。未触发时不出现该键 |
+| `no_progress_limit` | int |  | fresh start（可选，默认 0=关闭） | no-progress 探测器（`check_progress.py`，可选 Stop hook）的相邻无进展轮数阈值；env `DURABLE_LOOP_NOPROGRESS_N` 优先于此字段，两者 ≤0/缺失/garbage 一律视为 0=关闭（默认 OFF）。触发时写 `pending_approval.json`、置 status=`paused_for_approval`，并记录 `paused_reason` / `status_before_pause` |
+| `strict_guard` | bool |  | fresh start（可选，默认 false） | 开启 `durable_loop_guard.py` 的 strict 危险操作硬拦截（force push / reset --hard / rm -rf / DROP TABLE 等）；env `DURABLE_LOOP_STRICT`（1/true/yes/on）也可开启。默认关闭（纯质量收敛理念不变）。命中时 deny 并 best-effort 写 `pending_approval.json` |
 
 ### 关键设计约束
 
@@ -23,3 +30,6 @@
 - **resume vs fresh 判断**：文件不存在 或 status == "fresh" → fresh start；status in {running, paused_for_approval, failed, over_budget, thrashing} → resume；status == completed → 跳过（注意：必须用 `paused_for_approval`，不是 `paused`——prompt 和 schema 全程统一此枚举值，否则会落入 fresh-start 丢 state）
 - **预算不设护栏**（2026-06-19）+ **thrashing 已移除**（2026-06-20）：token/$/轮/小时、原地打转都不再阻断 loop——**纯质量收敛**。`budget_used` 仅观测，`max_budget` 不强制（全 0）。唯一 gate 是 `verify_done`
 - **~~thrashing 阈值~~（已移除 2026-06-20）**：原 cosine/token-overlap >0.9 连续 3 轮即停；纯质量收敛后已废，PreToolUse hook 从 settings.json 摘除
+- **新增运行时字段全部向后兼容（2026-06-22）**：`run_id` / `verify_history` / `converge_k` / `reset_every_n` / `reset_due` / `no_progress_limit` / `strict_guard` 在旧 checkpoint 缺失时各自取默认值，绝不硬失败。模板 `checkpoint.json` 已预置默认（`converge_k:2` / `reset_every_n:5` / `no_progress_limit:0` / `strict_guard:false`），但脚本不依赖模板预置。**默认理念不变**：收敛门控（K-连续-PASS）与 context-reset 是质量收敛增强（不阻断其他 session）；strict 守卫与 no-progress 暂停是**刹车类，默认关闭**，需显式 opt-in
+- **session.log 行格式（2026-06-22）**：每行 JSON 新增 `run_id` 键（位于 `ts` 与 `iter` 之间），由 `durable_loop_observe.py` 从 checkpoint 读取写入；旧日志无该键时 `replay_trace.py` 归入 `(no run_id)` 桶
+- **HITL 产物 `pending_approval.json`**：由 `durable_loop_guard.py`（strict 拦截）与 `check_progress.py`（no-progress 暂停）写入 `.scratch/<FEATURE>/`，结构 `{"requests":[{ts,tool,command,reason,status:"pending"}]}`。消费方人工清除该文件并把 status 从 `paused_for_approval` 改回 `running`（`status_before_pause` 记录原状态）即可恢复

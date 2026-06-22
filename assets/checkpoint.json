@@ -27,5 +27,11 @@
   "status": "fresh",
   "resume_from": "",
   "idempotency_keys": [],
-  "thrashing_counter": 0
+  "thrashing_counter": 0,
+  "run_id": "",
+  "verify_history": [],
+  "converge_k": 2,
+  "reset_every_n": 5,
+  "no_progress_limit": 0,
+  "strict_guard": false
 }
