@@ -331,6 +331,16 @@ LEARNINGS_MIN_CONFIDENCE = 6
 LEARNINGS_TOP_N = 10
 
 
+# --- evolution trend (Gap1: 进化度 metrics) -------------------------------
+# Track whether the loop is actually converging over its recent verify history.
+# This is a DERIVED, OBSERVATION-ONLY cache: authoritative convergence judgement
+# lives in verify_done.py (converge_k consecutive PASS). evolution_trend is a
+# best-effort snapshot so a context-reset agent can see its own progress curve.
+# Fail-open everywhere: any error yields {} / no-op and never affects the write.
+
+EVOLUTION_WINDOW = 10
+
+
 def read_verified_learnings(feature_dir: Path):
     """Read .scratch/<feature>/learnings.jsonl and return the top verified
     patterns: non-stale entries with type=='pattern' and confidence>=
@@ -383,6 +393,163 @@ def _fmt_learnings(rows) -> str:
         suffix = f" {insight}" if insight else ""
         lines.append(f"- [{r['key']}] ({r['confidence']}/10){suffix}")
     return "\n".join(lines)
+
+
+def compute_evolution(verify_history, iteration) -> dict:
+    """Compute the evolution trend over the last EVOLUTION_WINDOW verify entries.
+
+    Pure, fail-open: any malformed input (non-list, empty, garbage fields) yields
+    a safe default ({} or fields defaulted). Never raises.
+
+    Algorithm (window = the most recent EVOLUTION_WINDOW entries whose iteration
+    <= `iteration`, in insertion order):
+      - total/pass/fail counts (result in {"PASS","FAIL"} only; junk ignored)
+      - pass_rate = pass/total (0.0 if no usable rows)
+      - prev_pass_rate = pass_rate of the FIRST half of the window (older half),
+        used to judge direction; None if window too small
+      - converged = True iff the tail of the window is PASS and this window's own
+        trailing entry is PASS (a stability signal, not authoritative — see header)
+      - improving = pass_rate > prev_pass_rate when prev_pass_rate is computable,
+        else None (no conclusion for small windows to avoid false positives)
+    """
+    try:
+        if not isinstance(verify_history, list) or not verify_history:
+            return {}
+
+        cur_iter = _as_int(iteration, 0)
+        # Filter to entries at or before the current iteration; keep insertion order.
+        usable = []
+        for entry in verify_history:
+            if not isinstance(entry, dict):
+                continue
+            eit = entry.get("iteration", None)
+            if eit is None:
+                pass  # iteration-less entries count as in-window
+            else:
+                ei = _as_int(eit, None)
+                if ei is None or ei > cur_iter:
+                    continue
+            usable.append(entry)
+        window = usable[-EVOLUTION_WINDOW:]
+        if not window:
+            return {}
+
+        total = 0
+        pass_count = 0
+        fail_count = 0
+        last_result = None
+        for entry in window:
+            result = entry.get("result")
+            if result == "PASS":
+                total += 1
+                pass_count += 1
+                last_result = "PASS"
+            elif result == "FAIL":
+                total += 1
+                fail_count += 1
+                last_result = "FAIL"
+            # any other value -> ignored, not counted
+
+        pass_rate = (pass_count / total) if total > 0 else 0.0
+
+        # Direction: compare recent half (second half) against older half (first
+        # half). prev_pass_rate = pass rate of the older half. If the window has
+        # fewer than 4 usable rows we decline to judge direction (return None) to
+        # avoid the natural-rise false positive on small early windows.
+        prev_pass_rate = None
+        improving = None
+        converged = False
+        if len(window) >= 4:
+            mid = len(window) // 2
+            first_half = window[:mid]
+            second_half = window[mid:]
+            fh_total = sum(1 for e in first_half if isinstance(e, dict) and e.get("result") in ("PASS", "FAIL"))
+            fh_pass = sum(1 for e in first_half if isinstance(e, dict) and e.get("result") == "PASS")
+            if fh_total > 0:
+                prev_pass_rate = fh_pass / fh_total
+            sh_total = sum(1 for e in second_half if isinstance(e, dict) and e.get("result") in ("PASS", "FAIL"))
+            sh_pass = sum(1 for e in second_half if isinstance(e, dict) and e.get("result") == "PASS")
+            sh_rate = (sh_pass / sh_total) if sh_total > 0 else 0.0
+            improving = sh_rate > prev_pass_rate if prev_pass_rate is not None else None
+
+        # Convergence signal: the window's own tail entry is a PASS. This is a
+        # weak, observation-only signal — authoritative K-consecutive-PASS lives
+        # in verify_done.py. We don't require a streak count here.
+        if last_result == "PASS":
+            converged = True
+
+        return {
+            "iteration": cur_iter,
+            "window_size": len(window),
+            "pass_count": pass_count,
+            "fail_count": fail_count,
+            "pass_rate": round(pass_rate, 4),
+            "converged": converged,
+            "prev_pass_rate": round(prev_pass_rate, 4) if prev_pass_rate is not None else None,
+            "improving": improving,
+        }
+    except Exception:  # noqa: BLE001 — evolution is best-effort, never fatal
+        return {}
+
+
+def append_evolution_trend(cp: dict) -> None:
+    """Append this iteration's evolution snapshot to cp['evolution_trend'].
+
+    Reads cp['verify_history'] (written by verify_done.py) and cp['iteration'].
+    Trims evolution_trend to the last EVOLUTION_WINDOW entries. Entirely fail-open:
+    any error is swallowed and cp is left unchanged. Only mutates the in-memory cp
+    dict; the caller persists it in the shared atomic write."""
+    try:
+        if not isinstance(cp, dict):
+            return
+        verify_history = cp.get("verify_history")
+        if not isinstance(verify_history, list):
+            return
+        iteration = cp.get("iteration", 0)
+        snapshot = compute_evolution(verify_history, iteration)
+        if not snapshot:
+            return
+        trend = cp.get("evolution_trend")
+        if not isinstance(trend, list):
+            trend = []
+        trend.append(snapshot)
+        if len(trend) > EVOLUTION_WINDOW:
+            trend = trend[-EVOLUTION_WINDOW:]
+        cp["evolution_trend"] = trend
+    except Exception:  # noqa: BLE001 — never break the Stop hook
+        return
+
+
+def _fmt_evolution(cp: dict) -> str:
+    """Render the latest evolution_trend snapshot as a few bullet lines.
+    Fail-open: no/invalid trend -> '(暂无)'. This is a derived observation,
+    not authoritative convergence (that lives in verify_done.py)."""
+    try:
+        trend = cp.get("evolution_trend") if isinstance(cp, dict) else None
+        if not isinstance(trend, list) or not trend:
+            return "(暂无)"
+        snap = trend[-1]
+        if not isinstance(snap, dict):
+            return "(暂无)"
+        rate = snap.get("pass_rate")
+        rate_s = f"{rate * 100:.0f}%" if isinstance(rate, (int, float)) else "?"
+        improving = snap.get("improving")
+        if improving is True:
+            improving_s = "改善中 ↑"
+        elif improving is False:
+            improving_s = "退步 ↓"
+        else:
+            improving_s = "数据不足"
+        converged = "收敛 ✓" if snap.get("converged") else "未收敛 ✗"
+        win = snap.get("window_size", "?")
+        pc = snap.get("pass_count", "?")
+        fc = snap.get("fail_count", "?")
+        return (
+            f"- 最近 {win} 轮: PASS {pc} / FAIL {fc}, 通过率 {rate_s}\n"
+            f"- 趋势: {improving_s} · {converged}（观察值，权威收敛判定见 verify_done）"
+        )
+    except Exception:  # noqa: BLE001
+        return "(暂无)"
 
 
 def build_handoff(cp: dict, iteration: int, feature_dir: Path = None) -> str:
@@ -455,6 +622,10 @@ def build_handoff(cp: dict, iteration: int, feature_dir: Path = None) -> str:
         f"- tokens: {budget.get('tokens', 0)}",
         f"- dollars: {budget.get('dollars', 0)}",
         f"- hours: {budget.get('hours', 0)}",
+        "",
+        "## 进化趋势 (evolution)",
+        "",
+        _fmt_evolution(cp),
         "",
     ]
     return "\n".join(parts)
@@ -563,6 +734,12 @@ def main() -> int:
     # cumulative_state and flag reset_due so the next loop does a full reset.
     # Best-effort, never blocks; mutates cp (reset_due) folded into the write below.
     maybe_write_handoff(cp, feature_dir)
+
+    # 3b. evolution trend: append this iteration's progress snapshot (derived from
+    # verify_history written by verify_done.py) to cp['evolution_trend'], trimmed to
+    # EVOLUTION_WINDOW. Fail-open, mutates in-memory cp, persisted in the write below.
+    # NOTE: only reads cp['verify_history'] — no write conflict with verify_done.py.
+    append_evolution_trend(cp)
 
     # 4. atomic write back
     cp["last_updated"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")

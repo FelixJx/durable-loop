@@ -18,6 +18,7 @@
 | `thrashing_counter` | int |  | （已弃用） | thrashing 检测 2026-06-20 已移除（纯质量收敛）；字段保留兼容，不再更新/使用 |
 | `run_id` | string |  | fresh start 注入（resume 不变） | uuid4 hex 运行标识，由 `init_loop.py` 在 fresh/`--force` 时注入，resume 保留旧值。`session.log` 每行带此字段，`replay_trace.py` 按它分组成独立 run。缺失（旧 checkpoint）按 `""` 处理（向后兼容） |
 | `verify_history` | array |  | `verify_done.py` 每次运行 append | 每条 `{iteration:int\|null, result:"PASS"\|"FAIL", timestamp:ISO8601}`；尾部连续 PASS 数 ≥ `converge_k` 才判收敛（抗 flip-flop）。运行时不存在按 `[]` 处理；模板可不预置 |
+| `evolution_trend` | array |  | Stop hook（`durable_loop_checkpoint.py`）每轮 append | **派生缓存（Gap1 进化度 metrics），非权威**。每条 `{iteration, window_size, pass_count, fail_count, pass_rate, converged, prev_pass_rate, improving}`，由 `verify_history` 最近 `EVOLUTION_WINDOW`(=10) 条聚合而来。记录最近 10 轮收敛趋势供 handoff 渲染"我在变好吗"。`converged`/`improving` 仅观察值——**权威收敛判定永远只看 `verify_done`**（K-连续-PASS）。窗口 <4 条时 `improving`/`prev_pass_rate` 为 null（防小窗口假阳性）。运行时不存在按 `[]` 处理；超 10 条自动裁剪最旧 |
 | `converge_k` | int |  | fresh start（可选） | 收敛所需的连续 PASS 轮数 K，默认 2；优先级 env `DURABLE_LOOP_CONVERGE_K` > 此字段 > 默认 2。仅在 checkpoint 存在且可解析时启用门控；无 checkpoint 退化为原单次判定 |
 | `reset_every_n` | int |  | fresh start（可选） | context reset 节律：每 N 轮由 Stop hook（`durable_loop_checkpoint.py`）从 cumulative_state 刷新 handoff.md、归档旧版到 `.scratch/<FEATURE>/handoff_archive/iter_<N>.md` 并置 `reset_due`。默认 5，0=禁用，iteration=0 永不触发。缺失按默认 5 处理 |
 | `reset_due` | bool |  | Stop hook 触发 reset 时写 true | 标记下一轮需 full context reset；仅在 reset 触发时写入（只设不清），driver resume 时若为 true 则执行 reset 并把该键清回 false/删除。未触发时不出现该键 |

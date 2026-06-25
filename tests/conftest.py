@@ -88,11 +88,16 @@ def run_verify_done(tmp_path):
         cdir = tmp_path / ".scratch" / feature
         cdir.mkdir(parents=True, exist_ok=True)
         (cdir / "done.criteria.md").write_text(criteria_text, encoding="utf-8")
+        # Force UTF-8 on both ends: scripts emit CJK (尚未收敛 / 已收敛) and on a
+        # Windows GBK codepage the default text-mode reader thread raises
+        # UnicodeDecodeError, leaving stdout=None and masking the real rc/output.
         proc = subprocess.run(
-            [PY, str(SCRIPTS / "verify_done.py"), feature, str(tmp_path), "--timeout", str(timeout)],
-            capture_output=True, text=True,
+            [PY, "-X", "utf8", str(SCRIPTS / "verify_done.py"), feature,
+             str(tmp_path), "--timeout", str(timeout)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env={**__import__("os").environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
         )
-        return proc.returncode, proc.stdout + "\n" + proc.stderr
+        return proc.returncode, (proc.stdout or "") + "\n" + (proc.stderr or "")
     return _run
 
 
