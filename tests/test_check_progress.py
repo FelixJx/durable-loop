@@ -185,7 +185,7 @@ def test_stop_hook_failopen_no_loop(tmp_path):
     proc = subprocess.run(
         [PY, str(SCRIPTS / "check_progress.py")],
         input=json.dumps({"cwd": str(tmp_path), "hook_event_name": "Stop"}),
-        text=True, capture_output=True,
+        text=True, capture_output=True, encoding="utf-8", errors="replace",
     )
     assert proc.returncode == 0  # always exit 0 for Stop hook
 
@@ -213,7 +213,7 @@ def test_stop_hook_pauses_via_env(tmp_path):
         proc = subprocess.run(
             [PY, str(SCRIPTS / "check_progress.py")],
             input=json.dumps({"cwd": str(tmp_path), "hook_event_name": "Stop"}),
-            text=True, capture_output=True, env=env,
+            text=True, capture_output=True, encoding="utf-8", errors="replace", env=env,
         )
         assert proc.returncode == 0
 
@@ -225,6 +225,6 @@ def test_stop_hook_pauses_via_env(tmp_path):
 def test_cli_bad_feature_name_usage_error(tmp_path):
     proc = subprocess.run(
         [PY, str(SCRIPTS / "check_progress.py"), "bad/name"],
-        text=True, capture_output=True, cwd=str(tmp_path),
+        text=True, capture_output=True, encoding="utf-8", errors="replace", cwd=str(tmp_path),
     )
     assert proc.returncode == cp.EXIT_USAGE

@@ -25,9 +25,10 @@ PY = sys.executable
 def _run(*cli_args):
     proc = subprocess.run(
         [PY, str(SCRIPTS / "durable_loop_learn.py"), *[str(a) for a in cli_args]],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env={**__import__("os").environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
     )
-    return proc.returncode, proc.stdout, proc.stderr
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
 def _learnings_file(tmp_path, feature="f"):

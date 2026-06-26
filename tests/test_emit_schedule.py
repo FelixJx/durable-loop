@@ -20,8 +20,12 @@ def run_emit(tmp_path):
         cmd = [PY, EMIT, feature, horizon, pd]
         if extra:
             cmd += extra
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        return proc.returncode, proc.stdout, proc.stderr
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env={**__import__("os").environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+        )
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
     return _run
 
 

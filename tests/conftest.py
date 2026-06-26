@@ -73,12 +73,16 @@ def write_session_log(tmp_path):
 def run_hook():
     """Invoke a hook script via subprocess feeding stdin JSON. Returns (rc, stderr)."""
     def _run(script_name, stdin_obj, env=None):
+        full_env = {**__import__("os").environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+        if env:
+            full_env.update(env)
         proc = subprocess.run(
-            [PY, str(SCRIPTS / script_name)],
+            [PY, "-X", "utf8", str(SCRIPTS / script_name)],
             input=json.dumps(stdin_obj), text=True, capture_output=True,
-            env=env, cwd=stdin_obj.get("cwd"),
+            encoding="utf-8", errors="replace",
+            env=full_env, cwd=stdin_obj.get("cwd"),
         )
-        return proc.returncode, proc.stderr
+        return proc.returncode, proc.stderr or ""
     return _run
 
 
@@ -108,6 +112,10 @@ def run_init(tmp_path):
         cmd = [PY, str(SCRIPTS / "init_loop.py"), feature, pd]
         if extra:
             cmd += extra
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        return proc.returncode, proc.stdout, proc.stderr
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env={**__import__("os").environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+        )
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
     return _run

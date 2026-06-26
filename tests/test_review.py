@@ -26,11 +26,14 @@ PY = sys.executable
 
 
 def _run(*cli_args):
+    # Force UTF-8 both ends: script emits CJK and on a Windows GBK codepage the
+    # default text-mode reader thread raises UnicodeDecodeError, leaving stdout=None.
     proc = subprocess.run(
         [PY, str(SCRIPTS / "durable_loop_review.py"), *[str(a) for a in cli_args]],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env={**__import__("os").environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
     )
-    return proc.returncode, proc.stdout, proc.stderr
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
 def _learnings_file(tmp_path, feature="f"):
@@ -225,8 +228,9 @@ def test_review_result_is_searchable(tmp_path):
     proc = subprocess.run(
         [PY, str(SCRIPTS / "durable_loop_learn.py"), "search", "f", tmp_path,
          "--query", "crypto"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env={**__import__("os").environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
     )
-    assert proc.returncode == 0, proc.stderr
-    assert "Prior learning applied:" in proc.stdout
-    assert "do not roll your own crypto" in proc.stdout
+    assert proc.returncode == 0, proc.stderr or ""
+    assert "Prior learning applied:" in (proc.stdout or "")
+    assert "do not roll your own crypto" in (proc.stdout or "")

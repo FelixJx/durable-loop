@@ -24,9 +24,10 @@ PY = sys.executable
 def _run_replay(feature, project_dir):
     proc = subprocess.run(
         [PY, str(SCRIPTS / "replay_trace.py"), feature, str(project_dir)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env={**__import__("os").environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
     )
-    return proc.returncode, proc.stdout, proc.stderr
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
 # --- (a) run_id injection in init_loop.py ---------------------------------
