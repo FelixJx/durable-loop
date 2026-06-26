@@ -50,7 +50,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 VALID_TYPES = ("pattern", "pitfall")
 
 # Words ignored when scoring a search query — short connective noise only.
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]+")  # ASCII runs | CJK runs — bare [A-Za-z0-9]+ silently dropped ALL Chinese, breaking search/reflect-in on CJK-pattern learnings (审核理由/中文 pattern 全检索不到)
 
 
 def die(msg: str) -> "NoReturn":
